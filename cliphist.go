@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
+	"image"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,138 +15,88 @@ import (
 	"strings"
 	"time"
 
+	_ "embed"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+
+	_ "golang.org/x/image/bmp"
+
 	bolt "go.etcd.io/bbolt"
 )
 
-var (
-	maxItems        = flag.Uint64("max-items", 750, "maximum number of items to store")
-	maxDedupeSearch = flag.Uint64("max-dedupe-search", 20, "maximum number of last items to look through when finding duplicates")
-)
+//go:embed version.txt
+var version string
 
-func main() {
-	flag.Usage = func() {
+// allow us to test main
+func main() { os.Exit(main_()) }
+func main_() int {
+	flags := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	flags.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage:\n")
-		fmt.Fprintf(os.Stderr, "  %s <%s>\n", os.Args[0], strings.Join(commandList, "|"))
+		fmt.Fprintf(os.Stderr, "  $ %s <store|list|decode|delete|delete-query|wipe|version>\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "options:\n")
-		flag.PrintDefaults()
+		flags.VisitAll(func(f *flag.Flag) {
+			fmt.Fprintf(os.Stderr, "  -%s (default %s)\n", f.Name, f.DefValue)
+			fmt.Fprintf(os.Stderr, "    %s\n", f.Usage)
+		})
 	}
-	flag.Parse()
 
-	if len(flag.Args()) == 0 {
-		flag.Usage()
-		os.Exit(1)
+	maxItems := flags.Uint64("max-items", 750, "maximum number of items to store")
+	maxDedupeSearch := flags.Uint64("max-dedupe-search", 100, "maximum number of last items to look through when finding duplicates")
+
+	if err := flags.Parse(os.Args[1:]); err != nil {
+		return 1
 	}
-	cmd, ok := commands[flag.Args()[0]]
-	if !ok {
-		flag.Usage()
-		os.Exit(1)
+
+	var err error
+	switch flags.Arg(0) {
+	case "store":
+		switch os.Getenv("CLIPBOARD_STATE") { // from man wl-clipboard
+		case "sensitive":
+		case "clear":
+			err = deleteLast()
+		default:
+			err = store(os.Stdin, *maxDedupeSearch, *maxItems)
+		}
+	case "list":
+		err = list(os.Stdout)
+	case "decode":
+		err = decode(os.Stdin, os.Stdout, flags.Arg(1))
+	case "delete-query":
+		err = deleteQuery(flags.Arg(1))
+	case "delete":
+		err = delete(os.Stdin)
+	case "wipe":
+		err = wipe()
+	case "version":
+		fmt.Fprint(os.Stderr, version)
+	default:
+		flags.Usage()
+		return 1
 	}
-	if err := cmd(flag.Args()[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "error in %q: %v", flag.Args()[0], err)
-		os.Exit(1)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
 	}
+	return 0
 }
 
-var commands = map[string]func(args []string) error{
-	"store": func(_ []string) error {
-		input, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return fmt.Errorf("read stdin: %w", err)
-		}
-
-		db, err := initDB()
-		if err != nil {
-			return fmt.Errorf("opening db: %v", err)
-		}
-		defer db.Close()
-
-		if err := store(db, input, *maxDedupeSearch, *maxItems); err != nil {
-			return fmt.Errorf("storing: %w", err)
-		}
-		return nil
-	},
-
-	"list": func(_ []string) error {
-		db, err := initDBReadOnly()
-		if err != nil {
-			return fmt.Errorf("opening db: %w", err)
-		}
-		defer db.Close()
-		if err := list(db, os.Stdout); err != nil {
-			return fmt.Errorf("listing: %w", err)
-		}
-		return nil
-	},
-
-	"decode": func(_ []string) error {
-		input, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return fmt.Errorf("read stdin: %w", err)
-		}
-		db, err := initDBReadOnly()
-		if err != nil {
-			return fmt.Errorf("opening db: %w", err)
-		}
-		defer db.Close()
-		if err := decode(db, input, os.Stdout); err != nil {
-			return fmt.Errorf("decoding: %w", err)
-		}
-		return nil
-	},
-
-	"delete-query": func(args []string) error {
-		if len(args) == 0 {
-			return fmt.Errorf("no query provided")
-		}
-		db, err := initDB()
-		if err != nil {
-			return fmt.Errorf("opening db: %w", err)
-		}
-		defer db.Close()
-		if err := deleteQuery(db, args[0]); err != nil {
-			return fmt.Errorf("deleting query: %w", err)
-		}
-		return nil
-	},
-
-	"delete": func(args []string) error {
-		input, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return fmt.Errorf("read stdin: %w", err)
-		}
-		db, err := initDB()
-		if err != nil {
-			return fmt.Errorf("opening db: %w", err)
-		}
-		defer db.Close()
-		if err := delete(db, input); err != nil {
-			return fmt.Errorf("deleting query: %w", err)
-		}
-		return nil
-	},
-
-	"wipe": func(_ []string) error {
-		db, err := initDB()
-		if err != nil {
-			return fmt.Errorf("opening db: %w", err)
-		}
-		defer db.Close()
-		if err := wipe(db); err != nil {
-			return fmt.Errorf("wiping: %w", err)
-		}
-		return nil
-	},
-}
-
-var commandList []string
-
-func init() {
-	for command := range commands {
-		commandList = append(commandList, command)
+func store(in io.Reader, maxDedupeSearch, maxItems uint64) error {
+	input, err := io.ReadAll(in)
+	if err != nil {
+		return fmt.Errorf("read stdin: %w", err)
 	}
-}
+	if len(input) > 5*1e6 { // don't store >5MB
+		return nil
+	}
 
-func store(db *bolt.DB, input []byte, maxDedupeSearch, maxItems uint64) error {
+	db, err := initDB()
+	if err != nil {
+		return fmt.Errorf("opening db: %w", err)
+	}
+	defer db.Close()
+
 	if len(bytes.TrimSpace(input)) == 0 {
 		return nil
 	}
@@ -214,7 +166,13 @@ func deduplicate(b *bolt.Bucket, input []byte, maxDedupeSearch uint64) error {
 	return nil
 }
 
-func list(db *bolt.DB, out io.Writer) error {
+func list(out io.Writer) error {
+	db, err := initDBReadOnly()
+	if err != nil {
+		return fmt.Errorf("opening db: %w", err)
+	}
+	defer db.Close()
+
 	tx, err := db.Begin(false)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -229,9 +187,11 @@ func list(db *bolt.DB, out io.Writer) error {
 	return nil
 }
 
-func extractID(input []byte) (uint64, error) {
-	idStr, _, found := strings.Cut(string(input), "\t")
-	if !found {
+const fieldSep = "\t"
+
+func extractID(input string) (uint64, error) {
+	idStr, _, _ := strings.Cut(input, fieldSep)
+	if idStr == "" {
 		return 0, fmt.Errorf("input not prefixed with id")
 	}
 	id, err := strconv.Atoi(idStr)
@@ -241,11 +201,24 @@ func extractID(input []byte) (uint64, error) {
 	return uint64(id), nil
 }
 
-func decode(db *bolt.DB, input []byte, out io.Writer) error {
+func decode(in io.Reader, out io.Writer, input string) error {
+	if input == "" {
+		inp, err := io.ReadAll(in)
+		if err != nil {
+			return fmt.Errorf("read stdin: %w", err)
+		}
+		input = string(inp)
+	}
 	id, err := extractID(input)
 	if err != nil {
 		return fmt.Errorf("extracting id: %w", err)
 	}
+
+	db, err := initDBReadOnly()
+	if err != nil {
+		return fmt.Errorf("opening db: %w", err)
+	}
+	defer db.Close()
 
 	tx, err := db.Begin(false)
 	if err != nil {
@@ -254,14 +227,24 @@ func decode(db *bolt.DB, input []byte, out io.Writer) error {
 	defer tx.Rollback() //nolint:errcheck
 
 	b := tx.Bucket([]byte(bucketKey))
-	v := b.Get(itob(uint64(id)))
+	v := b.Get(itob(id))
 	if _, err := out.Write(v); err != nil {
 		return fmt.Errorf("writing out: %w", err)
 	}
 	return nil
 }
 
-func deleteQuery(db *bolt.DB, query string) error {
+func deleteQuery(query string) error {
+	if query == "" {
+		return fmt.Errorf("please provide a query")
+	}
+
+	db, err := initDB()
+	if err != nil {
+		return fmt.Errorf("opening db: %w", err)
+	}
+	defer db.Close()
+
 	tx, err := db.Begin(true)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -282,11 +265,12 @@ func deleteQuery(db *bolt.DB, query string) error {
 	return nil
 }
 
-func delete(db *bolt.DB, input []byte) error {
-	id, err := extractID(input)
+func deleteLast() error {
+	db, err := initDB()
 	if err != nil {
-		return fmt.Errorf("extract id: %w", err)
+		return fmt.Errorf("opening db: %w", err)
 	}
+	defer db.Close()
 
 	tx, err := db.Begin(true)
 	if err != nil {
@@ -295,8 +279,42 @@ func delete(db *bolt.DB, input []byte) error {
 	defer tx.Rollback() //nolint:errcheck
 
 	b := tx.Bucket([]byte(bucketKey))
-	if err := b.Delete(itob(uint64(id))); err != nil {
-		return fmt.Errorf("delete key: %w", err)
+	c := b.Cursor()
+	k, _ := c.Last()
+	_ = b.Delete(k)
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+	return nil
+}
+
+func delete(in io.Reader) error {
+	input, err := io.ReadAll(in) // drain stdin before opening and locking db
+	if err != nil {
+		return fmt.Errorf("read stdin: %w", err)
+	}
+	db, err := initDB()
+	if err != nil {
+		return fmt.Errorf("opening db: %w", err)
+	}
+	defer db.Close()
+
+	tx, err := db.Begin(true)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	for sc := bufio.NewScanner(bytes.NewReader(input)); sc.Scan(); {
+		id, err := extractID(sc.Text())
+		if err != nil {
+			return fmt.Errorf("extract id: %w", err)
+		}
+		b := tx.Bucket([]byte(bucketKey))
+		if err := b.Delete(itob(id)); err != nil {
+			return fmt.Errorf("delete key: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -305,7 +323,13 @@ func delete(db *bolt.DB, input []byte) error {
 	return nil
 }
 
-func wipe(db *bolt.DB) error {
+func wipe() error {
+	db, err := initDB()
+	if err != nil {
+		return fmt.Errorf("opening db: %w", err)
+	}
+	defer db.Close()
+
 	tx, err := db.Begin(true)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -368,28 +392,14 @@ func initDBOption(ro bool) (*bolt.DB, error) {
 }
 
 func preview(index uint64, data []byte) string {
-	data = data[:min(len(data), 100)]
-	if mime := mime(data); mime != "" {
-		return fmt.Sprintf("%d\tbinary data %s", index, mime)
+	if config, format, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
+		return fmt.Sprintf("%d%s[[ binary data %s %s %dx%d ]]",
+			index, fieldSep, sizeStr(len(data)), format, config.Width, config.Height)
 	}
+	data = data[:min(len(data), 100)]
 	data = bytes.TrimSpace(data)
 	data = bytes.Join(bytes.Fields(data), []byte(" "))
-	return fmt.Sprintf("%d\t%s", index, data)
-}
-
-func mime(data []byte) string {
-	switch {
-	case bytes.HasPrefix(data, []byte("\x89PNG\x0D\x0A\x1A\x0A")):
-		return "image/png"
-	case bytes.HasPrefix(data, []byte("\xFF\xD8\xFF")):
-		return "image/jpeg"
-	case bytes.HasPrefix(data, []byte("GIF87a")):
-		return "image/gif"
-	case bytes.HasPrefix(data, []byte("GIF89a")):
-		return "image/gif"
-	default:
-		return ""
-	}
+	return fmt.Sprintf("%d%s%s", index, fieldSep, data)
 }
 
 func min(a, b int) int {
@@ -407,4 +417,16 @@ func itob(v uint64) []byte {
 
 func btoi(v []byte) uint64 {
 	return binary.BigEndian.Uint64(v)
+}
+
+func sizeStr(size int) string {
+	units := []string{"B", "KiB", "MiB"}
+
+	var i int
+	fsize := float64(size)
+	for fsize >= 1024 && i < len(units)-1 {
+		fsize /= 1024
+		i++
+	}
+	return fmt.Sprintf("%.0f %s", fsize, units[i])
 }
