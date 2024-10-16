@@ -31,8 +31,7 @@ image mime inferance)
 #### listen for clipboard changes
 
 `$ wl-paste --watch cliphist store`  
-this will listen for changes on your primary keyboard and write it to
-the history.  
+this will listen for changes on your primary clipboard and write them to the history.  
 call it once per session - for example in your sway config
 
 #### select old item
@@ -64,7 +63,7 @@ or else query manually
 <details>
 <summary>fzf</summary>
 
-`cliphist list | fzf | cliphist decode | wl-copy`
+`cliphist list | fzf --no-sort | cliphist decode | wl-copy`
 
 </details>
 
@@ -91,6 +90,18 @@ or else query manually
 
 (requires [contrib/cliphist-rofi-img](https://github.com/sentriz/cliphist/blob/master/contrib/cliphist-rofi-img))
 
+</details>
+
+<details>
+  <summary>wofi</summary>
+
+  `cliphist list | wofi -S dmenu | cliphist decode | wl-copy`
+
+  Example config for sway:
+```
+exec wl-paste --watch cliphist store
+bindsym Mod1+p exec cliphist list | wofi -S dmenu | cliphist decode | wl-copy
+```
 </details>
 
 ---

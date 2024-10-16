@@ -8,6 +8,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	mathrand "math/rand"
 	"os"
 	"strconv"
 	"testing"
@@ -20,11 +21,21 @@ func TestMain(m *testing.M) {
 	testImage := image.NewRGBA(image.Rectangle{Max: image.Point{20, 20}})
 
 	os.Exit(testscript.RunMain(m, map[string]func() int{
-		"cliphist": main_,
+		"cliphist": func() int { main(); return 0 },
 
 		"rand": func() int {
 			size, _ := strconv.Atoi(os.Args[1])
 			_, _ = io.CopyN(os.Stdout, rand.Reader, int64(size))
+			return 0
+		},
+		"randstr": func() int {
+			size, _ := strconv.Atoi(os.Args[1])
+			const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+			b := make([]byte, size)
+			for i := range b {
+				b[i] = letterBytes[mathrand.Intn(len(letterBytes))]
+			}
+			os.Stdout.Write(b)
 			return 0
 		},
 

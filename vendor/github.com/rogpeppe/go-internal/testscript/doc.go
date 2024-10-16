@@ -38,7 +38,7 @@ In general script files should have short names: a few words, not whole sentence
 The first word should be the general category of behavior being tested,
 often the name of a subcommand to be tested or a concept (vendor, pattern).
 
-Each script is a text archive (go doc github.com/rogpeppe/go-internal/txtar).
+Each script is a text archive (go doc golang.org/x/tools/txtar).
 The script begins with an actual command script to run
 followed by the content of zero or more supporting files to
 create in the script's temporary file system before it starts executing.
@@ -204,6 +204,16 @@ The predefined commands are:
   - [!] stdout [-count=N] pattern
     Apply the grep command (see above) to the standard output
     from the most recent exec or wait command.
+
+  - ttyin [-stdin] file
+    Attach the next exec command to a controlling pseudo-terminal, and use the
+    contents of the given file as the raw terminal input. If -stdin is specified,
+    also attach the terminal to standard input.
+    Note that this does not attach the terminal to standard output/error.
+
+  - [!] ttyout [-count=N] pattern
+    Apply the grep command (see above) to the raw controlling terminal output
+    from the most recent exec command.
 
   - stop [message]
     Stop the test early (marking it as passing), including the message if given.
